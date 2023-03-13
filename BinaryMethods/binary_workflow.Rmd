@@ -1,0 +1,190 @@
+---
+title: "Clustering workflow using binarized single-cell RNA-seq data"
+output: html_document
+date: "2022-11-01"
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This markdown is supplement to the paper: [The rise of sparser single-cell RNA-seq dataset; consequences and opportunities](https://doi.org/10.1101/2022.05.20.492823).
+In this markdown we perform a complete clustering workflow using **only** binarized single-cell RNA-seq data.
+This workflow contains the following:
+
+-   Finding a representative set of genes.
+
+-   Clustering of cells.
+
+-   Generating a UMAP plot.
+
+-   Identification of marker genes.
+
+-   Cell type annotation, using known marker genes.
+
+# Packages
+
+```{r,message=FALSE, warning=FALSE}
+require(ggplot2)
+require(patchwork)
+require(Matrix)
+require(svd)
+require(igraph)
+require(dbscan)
+require(locStra)
+require(leiden)
+require(knitr)
+require(BRETIGEA)
+require(reshape2)
+```
+
+# Load Functions
+
+```{r,message=FALSE, warning=FALSE}
+for(i in list.files("./functions")){source(sprintf("./functions/%s",i))}
+```
+
+# Load Data
+
+This single-cell brain dataset originates from [Grubman et al](https://doi.org/10.1038/s41593-019-0539-4).
+Cells without labels and doublets were removed, as well as cells originating from diseased individuals.
+
+```{r,message=FALSE, warning=FALSE}
+data <- readRDS("./data/exampleData.rds")
+counts <- data[[1]]
+samplesheet <- data[[2]]
+rm(data)
+```
+
+# Binarize Data
+
+Binarizing is done by assigning a one to every non-zero value.
+Every zero remains a zero.
+The count matrix is removed, as it is not used for any downstream tasks.
+
+```{r,message=FALSE, warning=FALSE}
+binary <- binarize(counts)
+rm(counts)
+```
+
+# Find Representative Gene Set
+
+```{r,message=FALSE, warning=FALSE}
+repGenes <- binaryRepGeneSet(binary)
+```
+
+# Clustering
+
+For clustering, first the Jaccard cell-cell similarity matrix is calculated.
+Then, of this matrix, the eigen vectors are calculated.
+With these eigen vectors, using the euclidean distance, a shared nearest neighbor graph is constructed.
+This graph is fed to the Leiden clustering algorithm.
+
+```{r,message=FALSE, warning=FALSE}
+clusters <- binaryClustering(binary = binary[repGenes,], reduction = "JEV", nc = 15)
+```
+
+## Make UMAP
+
+For the UMAP, first the Jaccard cell-cell similarity matrix is calculated.
+Then, of this matrix, the eigen vectors are calculated.
+These eigen vectors are fed to the UMAP algorithm, again, using euclidean distance as metric.
+
+```{r,message=FALSE, warning=FALSE}
+UMAP <- binaryUMAP(binary = binary[repGenes,], reduction = "JEV", nc = 15)
+```
+
+## Plot UMAP
+
+```{r,message=FALSE, warning=FALSE}
+plotData <- data.frame("UMAP1" = UMAP[,1],
+                       "UMAP2" = UMAP[,2],
+                       "cluster" = as.factor(clusters$cluster))
+ggplot(plotData,aes(UMAP1,UMAP2, col = cluster)) + geom_point(size = 0.4, alpha = 0.7) + theme_minimal()
+```
+
+## Find Markers For Each Cluster
+
+Markers are identified using Pearson's correlation coefficient between binary matrix and the one-hot encoded cluster assignment matrix.
+
+```{r,message=FALSE, warning=FALSE}
+markers <- findMarkers(binary,clusters = clusters$cluster)
+```
+
+## Top Markers Of Cluster 0
+
+```{r,message=FALSE, warning=FALSE,echo=FALSE}
+knitr::kable(head(markers$`0`))
+```
+
+## Binary Expression Of Cluster 0 Markers
+
+```{r,message=FALSE, fig.width= 9, fig.height=4, warning=FALSE,echo=FALSE}
+plotData$marker_for_zero1 <-  as.factor(binary[markers$`0`[1,"gene"],])
+
+plotData$marker_for_zero2 <-  as.factor(binary[markers$`0`[2,"gene"],])
+
+marker1 <- ggplot(plotData,aes(UMAP1,UMAP2, col = marker_for_zero1)) + geom_point(size = 0.4, alpha = 0.7) +
+  theme_minimal() + labs(col = markers$`0`[1,"gene"])
+
+marker2 <- ggplot(plotData,aes(UMAP1,UMAP2, col = marker_for_zero2)) + geom_point(size = 0.4, alpha = 0.7) +
+  theme_minimal() + labs(col = markers$`0`[2,"gene"])
+
+marker1 | marker2
+```
+
+## Top Markers Of Cluster 1
+
+```{r,message=FALSE, warning=FALSE,echo=FALSE}
+knitr::kable(head(markers$`1`))
+```
+
+## Binary Expression Of Cluster 1 Markers
+
+```{r,message=FALSE, fig.width= 9, fig.height=4, warning=FALSE,echo=FALSE}
+plotData$marker_for_one1 <-  as.factor(binary[markers$`1`[1,"gene"],])
+
+plotData$marker_for_one2 <-  as.factor(binary[markers$`1`[2,"gene"],])
+
+marker1 <- ggplot(plotData,aes(UMAP1,UMAP2, col = marker_for_one1)) + geom_point(size = 0.4, alpha = 0.7) +
+  theme_minimal() + labs(col = markers$`1`[1,"gene"])
+
+marker2 <- ggplot(plotData,aes(UMAP1,UMAP2, col = marker_for_one2)) + geom_point(size = 0.4, alpha = 0.7) +
+  theme_minimal() + labs(col = markers$`1`[2,"gene"])
+
+marker1 | marker2
+```
+
+## Annotate clusters based on markers' expression
+
+```{r,message=FALSE, warning=FALSE}
+celltypes <- annotate_clusters(markers,BRETIGEA::markers_df_human_brain)
+```
+
+## Cell type assignments
+
+```{r,message=FALSE, warning=FALSE,echo=FALSE}
+knitr::kable(t(celltypes))
+```
+
+## UMAP with cell type labels and validation of cell type assignments
+
+Binary-based annotations compared to original count-based annotations from [Grubman et al](https://doi.org/10.1038/s41593-019-0539-4).
+
+```{r,message=FALSE, warning=FALSE,echo=FALSE, fig.width= 9, fig.height=4}
+samplesheet$cluster <- clusters$cluster
+samplesheet$UMAP1 <- UMAP[,1]
+samplesheet$UMAP2 <- UMAP[,2]
+samplesheet$anno_celltype <- celltypes[match(samplesheet$cluster,names(celltypes))]
+a <- ggplot(samplesheet,aes(UMAP1,UMAP2, col = anno_celltype)) + geom_point(size = 0.4, alpha = 0.7) + theme_minimal()
+conf <- table(samplesheet$celltype,samplesheet$anno_celltype)
+long <- melt(conf)
+colnames(long) <- c("count-based annotations","binary-based annotations","value")
+b <- ggplot(long,aes(`count-based annotations`,`binary-based annotations`, fill = value)) + geom_tile() +
+  viridis::scale_fill_viridis() + geom_text(aes(`count-based annotations`,`binary-based annotations`, label = value), color = "white", size = 4) + theme_minimal()
+
+a | b
+```
